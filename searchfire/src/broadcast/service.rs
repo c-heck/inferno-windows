@@ -9,7 +9,7 @@ use std::{
 use trust_dns_client::{
 	op::{Header as DnsHeader, Message as DnsMessage, MessageType as DnsMessageType, OpCode as DnsOpCode},
 	rr::{
-		rdata::{SRV, TXT},
+		rdata::{A, AAAA, PTR, SRV, TXT},
 		DNSClass as DnsClass, Name as DnsName, RData, Record as DnsRecord, RecordType as DnsRecordType,
 	},
 };
@@ -228,8 +228,8 @@ impl Service {
 							IpAddr::V6(_) => DnsRecordType::AAAA,
 						})
 						.set_data(Some(match addr {
-							IpAddr::V4(addr) => RData::A(*addr),
-							IpAddr::V6(addr) => RData::AAAA(*addr),
+							IpAddr::V4(addr) => RData::A(A(*addr)),
+							IpAddr::V6(addr) => RData::AAAA(AAAA(*addr)),
 						}))
 						.set_name(self.service_id.clone())
 						.set_ttl(self.ttl)
@@ -262,7 +262,7 @@ impl Service {
 			record
 				.set_dns_class(DnsClass::IN)
 				.set_rr_type(DnsRecordType::PTR)
-				.set_data(Some(RData::PTR(self.service_id.clone())))
+				.set_data(Some(RData::PTR(PTR(self.service_id.clone()))))
 				.set_name(self.service_type.clone())
 				.set_ttl(self.ttl);
 
@@ -280,8 +280,8 @@ impl Service {
 						IpAddr::V6(_) => DnsRecordType::AAAA,
 					})
 					.set_data(Some(match addr {
-						IpAddr::V4(addr) => RData::A(*addr),
-						IpAddr::V6(addr) => RData::AAAA(*addr),
+						IpAddr::V4(addr) => RData::A(A(*addr)),
+						IpAddr::V6(addr) => RData::AAAA(AAAA(*addr)),
 					}))
 					.set_name(self.service_hostname.clone())
 					.set_ttl(self.ttl)

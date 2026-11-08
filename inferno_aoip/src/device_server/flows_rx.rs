@@ -9,7 +9,7 @@ use crate::{common::*, media_clock::MediaClock};
 
 use std::io::ErrorKind::WouldBlock;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI32, AtomicUsize};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize};
 use std::sync::{Arc, RwLock, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -78,6 +78,7 @@ struct SocketData<P: ProxyToSamplesBuffer> {
   channels: Vec<Option<Channel<P>>>,
   empty_sinks_vecs: Vec<Vec<RBInput<Sample, P>>>,
   actual_latency_samples: Arc<AtomicI32>,
+  late_packets: Arc<AtomicU32>,
   stats: FlowStats,
 }
 
@@ -168,6 +169,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               let gap = timestamp_diff as u64;
               let missed = (gap / frame_size as u64).saturating_sub(1);
               sd.stats.missed_packets += missed;
+              super::traffic::RX_ERRORS.fetch_add(missed, Ordering::Relaxed);
             }
             
             // Jitter calculation: difference between actual and expected interval
@@ -219,7 +221,11 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           if let Some(now) = clock.wrapping_now_in_timebase(sample_rate.into()) {
             let latency = wrapped_diff(now, timestamp).clamp(0, i32::MAX as _);
             sd.actual_latency_samples.fetch_max(latency as _, Ordering::Relaxed);
+            if latency as usize > sd.latency_samples {
+              sd.late_packets.fetch_add(1, Ordering::Relaxed);
+            }
           }
+          super::traffic::add_rx(recv_size);
 
           if write {
             let num_channels = sd.channels.len();
@@ -576,6 +582,8 @@ pub struct FlowInfo {
   pub channels_map: Vec<BoolVec>,
   pub latency_samples: u32,
   pub actual_latency_samples: Arc<AtomicI32>,
+  /// Packets that arrived later than the flow's configured latency.
+  pub late_packets: Arc<AtomicU32>,
 }
 
 pub struct FlowsReceiver<P: ProxyToSamplesBuffer> {
@@ -684,11 +692,13 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       .collect_vec();
     let port = socket.local_addr().unwrap().port();
     let als: Arc<AtomicI32> = Arc::new(0.into());
+    let late: Arc<AtomicU32> = Arc::new(0.into());
     self.flows_info.write().unwrap()[local_index] = Some(FlowInfo {
       rx_port: port,
       channels_map: (0..channels_count).map(|_| boolvec![false; self.max_channels]).collect(),
       latency_samples: latency_samples.try_into().unwrap(),
       actual_latency_samples: als.clone(),
+      late_packets: late.clone(),
     });
     self
       .commands_sender
@@ -704,6 +714,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
           channels: (0..channels_count).map(|_| None).collect(),
           empty_sinks_vecs,
           actual_latency_samples: als,
+          late_packets: late,
           stats: FlowStats::new(Instant::now()),
         },
       })

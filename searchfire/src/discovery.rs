@@ -208,7 +208,7 @@ impl Discovery {
 			}
 
 			let response = match DnsMessage::from_bytes(&packet[..recv_size]) {
-				Ok(response) if response.message_type() == DnsMessageType::Response => DnsResponse::from(response),
+				Ok(response) if response.message_type() == DnsMessageType::Response => DnsResponse::new(response, packet[..recv_size].to_vec()),
 				_ => continue,
 			};
 			if !filter(origin_addr, &response) {
@@ -328,7 +328,7 @@ impl Discovery {
 		}
 
 		let response = match DnsMessage::from_bytes(&packet[..count]) {
-			Ok(response) if response.message_type() == DnsMessageType::Response => DnsResponse::from(response),
+			Ok(response) if response.message_type() == DnsMessageType::Response => DnsResponse::new(response, packet[..count].to_vec()),
 			_ => return,
 		};
 

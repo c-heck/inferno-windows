@@ -20,6 +20,29 @@ use searchfire::{
 
 pub type TxtEntries = BTreeMap<String, String>;
 
+#[cfg(test)]
+mod live_tests {
+  use super::*;
+
+  #[tokio::test]
+  #[ignore = "Requires an explicitly selected live Dante transmitter"]
+  async fn live_channel_resolution() {
+    let interface = std::env::var("INFERNO_MDNS_TEST_INTERFACE")
+      .expect("Set test interface")
+      .parse()
+      .expect("Invalid IPv4 interface");
+    let hostname = std::env::var("INFERNO_MDNS_TEST_HOST").expect("Set transmitter hostname");
+    let channel = std::env::var("INFERNO_MDNS_TEST_CHANNEL").expect("Set transmitter channel");
+    let settings = crate::device_server::Settings::new(
+      "mDNS diagnostic", "MDNS", Some(interface), &BTreeMap::new(),
+    );
+    let client = MdnsClient::new(Arc::new(settings.self_info));
+    let result = client.query_chan(&hostname, &channel).await;
+    println!("Live channel resolution: {result:?}");
+    assert!(result.is_ok(), "Live transmitter channel could not be resolved");
+  }
+}
+
 #[derive(Debug)]
 pub struct AdvertisedService {
   pub addr: SocketAddr,
@@ -204,7 +227,7 @@ impl MdnsClient {
         if let Some(rdata) = record.data() {
           if let Some(a) = rdata.as_a() {
             return Ok(AdvertisedService {
-              addr: SocketAddr::new(std::net::IpAddr::V4(*a), port),
+              addr: SocketAddr::new(std::net::IpAddr::V4(a.0), port),
               properties,
             });
           }
@@ -220,7 +243,7 @@ impl MdnsClient {
         if let Some(rdata) = record.data() {
           if let Some(a) = rdata.as_a() {
             return Ok(AdvertisedService {
-              addr: SocketAddr::new(std::net::IpAddr::V4(*a), port),
+              addr: SocketAddr::new(std::net::IpAddr::V4(a.0), port),
               properties,
             });
           }
@@ -294,7 +317,7 @@ impl MdnsClient {
       tx_channels_per_flow: parse_int("nchan")?,
       tx_channel_id: parse_int("id")? as u16,
       bits_per_sample: parse_int("enc").or_else(|_| parse_int("en"))? as u32,
-      dbcp1: parse_int("dbcp1")? as u16,
+      dbcp1: channel_control_version(&result.properties)?,
       fpp_min: fpp2.parse()?,
       fpp_max: fpp1.parse()?,
       min_rx_latency_ns: parse_int("latency_ns")?,
@@ -320,5 +343,29 @@ impl MdnsClient {
       min_rx_latency_ns: parse_int("latency_ns")?,
       media_addr,
     });
+  }
+}
+
+fn channel_control_version(properties: &TxtEntries) -> Result<u16, Box<dyn Error>> {
+  let key = if properties.contains_key("dbcp1") { "dbcp1" } else { "dbcp" };
+  let version = MdnsClient::parse_int_from_dict(properties, key)?;
+  Ok(u16::try_from(version)?)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn legacy_channel_control_version_and_validation() {
+    let mut properties = BTreeMap::from([("dbcp".into(), "0x1005".into())]);
+    assert_eq!(channel_control_version(&properties).unwrap(), 0x1005);
+    properties.insert("dbcp1".into(), "0x1102".into());
+    assert_eq!(channel_control_version(&properties).unwrap(), 0x1102);
+    properties.insert("dbcp1".into(), "bad".into());
+    assert!(channel_control_version(&properties).is_err());
+    properties.insert("dbcp1".into(), "65536".into());
+    assert!(channel_control_version(&properties).is_err());
+    assert!(channel_control_version(&BTreeMap::new()).is_err());
   }
 }

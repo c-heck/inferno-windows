@@ -15,6 +15,52 @@ use crate::{
 };
 use tokio::sync::broadcast::Receiver as BroadcastReceiver;
 
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn legacy_yamaha_flow_request_uses_parameter_offset() {
+    let packet = hex::decode(concat!(
+      "10040040002b0100000000240000bb8000000018000100040038",
+      "0002000100000000002e4f3252536c6f743400000400000000200036",
+      "320008023805c0a84540",
+    )).unwrap();
+    assert_eq!(packet.len(), 64);
+    let (fpp, name_offset) = flow_request_parameters(&packet, 4).unwrap();
+    assert_eq!(fpp, 32);
+    assert_eq!(read_0term_str_from_buffer(&packet, name_offset).unwrap(), "2");
+  }
+
+  #[test]
+  fn modern_inline_flow_request_and_invalid_offsets() {
+    let mut packet = vec![0; 64];
+    packet[34..36].copy_from_slice(&36u16.to_be_bytes());
+    packet[36..44].copy_from_slice(&[0x0a, 0, 0, 2, 0, 16, 0, 54]);
+    assert_eq!(flow_request_parameters(&packet, 4).unwrap(), (16, 54));
+    assert!(flow_request_parameters(&packet[..35], 4).is_err());
+    packet[34..36].copy_from_slice(&34u16.to_be_bytes());
+    assert!(flow_request_parameters(&packet, 4).is_err());
+    packet[34..36].copy_from_slice(&60u16.to_be_bytes());
+    assert!(flow_request_parameters(&packet, 4).is_err());
+  }
+}
+
+fn flow_request_parameters(packet: &[u8], num_channels: u16) -> Result<(u16, usize), &'static str> {
+  let pointer_offset = req_resp::HEADER_LENGTH + 16 + usize::from(num_channels) * 2;
+  if packet.len() < pointer_offset + 2 {
+    return Err("missing flow parameter descriptor offset");
+  }
+  let offset = usize::from(make_u16(packet[pointer_offset], packet[pointer_offset + 1]));
+  if offset < pointer_offset + 2 || packet.len() < offset + 8 {
+    return Err("invalid flow parameter descriptor offset");
+  }
+  Ok((
+    make_u16(packet[offset + 4], packet[offset + 5]),
+    usize::from(make_u16(packet[offset + 6], packet[offset + 7])),
+  ))
+}
+
 pub async fn run_server(
   self_info: Arc<DeviceInfo>,
   flows_tx: Arc<Mutex<Option<FlowsTransmitter>>>,
@@ -50,7 +96,7 @@ pub async fn run_server(
           let remote_descr_offset = make_u16(c[14], c[15]) as usize;
           
           // Validate bounds for channel indices before accessing them
-          let required_len = 16 + (num_channels as usize) * 2 + 6 + 4;
+          let required_len = 16 + (num_channels as usize) * 2 + 2;
           if c.len() < required_len {
             error!("packet too short for num_channels: {} (need {} bytes)", hex::encode(c), required_len);
             conn.respond_with_code(0x0302u16, &[]).await;
@@ -66,11 +112,15 @@ pub async fn run_server(
               }
             })
             .collect_vec();
-          let offset = (16 + num_channels * 2 + 6) as usize;
-          let fpp = make_u16(c[offset], c[offset + 1]);
-          let rx_flow_name_offset = make_u16(c[offset + 2], c[offset + 3]) as usize;
-
           let req_bytes = request.into_storage();
+          let (fpp, rx_flow_name_offset) = match flow_request_parameters(req_bytes, num_channels) {
+            Ok(parameters) => parameters,
+            Err(e) => {
+              error!("invalid flow request parameters: {e}; packet: {}", hex::encode(req_bytes));
+              conn.respond_with_code(0x0302u16, &[]).await;
+              continue;
+            }
+          };
           
           // Validate offsets before reading strings
           // map_err converts Box<dyn StdError> (non-Send) to () so the future stays Send
@@ -114,17 +164,19 @@ pub async fn run_server(
           if channel_indices.iter().flatten().find(|&&chi| chi >= self_info.tx_channels.len()).is_some() {
             error!("too large channel number, returning error");
             conn.respond_with_code(0x0302u16 /* ??? TODO */, &[]).await;
+            continue;
           }
           if sample_rate != self_info.sample_rate {
             error!("sample rate mismatch, returning error");
             conn.respond_with_code(FlowControlError::SampleRateMismatch as u16, &[]).await;
             continue;
           }
-          if fpp > FPP_MAX {
+          if fpp == 0 || fpp > FPP_MAX {
             error!("too large fpp, returning error");
             conn.respond_with_code(0x0302u16 /* TODO */, &[]).await;
             continue;
           }
+
           let flow_info = FlowInfo {
             rx_hostname: hostname.into(),
             rx_flow_name: rx_flow_name.into(),

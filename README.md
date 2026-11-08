@@ -6,6 +6,21 @@ Windows port of [Inferno](https://github.com/teodly/inferno) — an unofficial o
 
 **Receive Dante AoIP audio and play via Windows (RX mode)** or **capture Windows audio and transmit as Dante AoIP (TX mode)**.
 
+## Experimental Windows ARM64 ASIO device
+
+The new [native ASIO implementation](inferno_asio/README.md) targets Snapdragon
+Windows ARM64: 64x64 at 44.1/48 kHz, 32x32 at 96 kHz, and selectable 20/10/6/4 ms
+network buffers. Its native `inferno_control.exe` GUI configures the Ethernet
+interface, rate, channels, and buffers, saves settings, and runs an offline
+DLL audio test. It is separate from the WASAPI/SYSVAD path described below.
+Build and offline DLL tests are provided; physical Dante interoperability and
+native ARM64 DAW validation remain required. It is not a certified DVS replacement.
+For **Nuendo 14 on Windows on Arm (ARM64EC)**, use the separate build:
+`.\scripts\build-arm64-asio.ps1 -Architecture ARM64EC`. Its DLL and control panel
+are in `target\arm64ec-pc-windows-msvc\release`; register using
+`.\scripts\register-arm64-asio.ps1 -Architecture ARM64EC`. The pure ARM64 DLL
+cannot be loaded by ARM64EC hosts. Nuendo acceptance testing remains outstanding.
+
 ## Quick Start
 
 ### Prerequisites
@@ -209,4 +224,3 @@ Prometheus:
 
 - [SETUP.md](SETUP.md) — SYSVAD installation and driver setup
 - [NOTES.md](NOTES.md) — Known issues, PTP clock sync, performance tuning
-

@@ -173,8 +173,8 @@ impl MulticastSocketEx<Ipv6Interface> for tokio::net::UdpSocket {
 		unsafe {
 			let res = libc::setsockopt(
 				self.as_raw_socket() as _,
-				winapi::shared::ws2def::IPPROTO_IPV6 as _,
-				winapi::shared::ws2ipdef::IPV6_MULTICAST_IF as _,
+				windows_sys::Win32::Networking::WinSock::IPPROTO_IPV6,
+				windows_sys::Win32::Networking::WinSock::IPV6_MULTICAST_IF,
 				&iface.as_u32() as *const _ as *const _,
 				std::mem::size_of::<u32>() as _,
 			);
@@ -196,8 +196,8 @@ impl MulticastSocketEx<Ipv4Addr> for tokio::net::UdpSocket {
 		unsafe {
 			let res = libc::setsockopt(
 				self.as_raw_socket() as _,
-				winapi::shared::ws2def::IPPROTO_IP as _,
-				winapi::shared::ws2ipdef::IP_MULTICAST_IF as _,
+				windows_sys::Win32::Networking::WinSock::IPPROTO_IP,
+				windows_sys::Win32::Networking::WinSock::IP_MULTICAST_IF,
 				&iface as *const _ as *const _,
 				std::mem::size_of::<u32>() as _,
 			);

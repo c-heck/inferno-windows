@@ -9,3 +9,7 @@ members = [
     "inferno_gui",
     "inferno_asio",
 ]
+
+[patch.crates-io]
+# Keep the 0.5 socket API required by mDNS, using ARM64EC-aware Windows bindings.
+socket2 = { path = "vendor/socket2" }

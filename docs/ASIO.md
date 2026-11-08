@@ -1,5 +1,19 @@
 # ASIO Support for Inferno
 
+> **Windows ARM64 development:** a native experimental ASIO DLL now lives in
+> [inferno_asio](../inferno_asio/README.md), with 64x64 at 44.1/48 kHz,
+> 32x32 at 96 kHz, 20/10/6/4 ms network settings, and a native
+> `inferno_control.exe` configuration GUI. Use its build, registration,
+> and validation instructions. The WASAPI/ASIO4ALL discussion and older roadmap
+> below describe the legacy path, not this new implementation. Physical Dante
+> interoperability and native DAW operation remain unverified.
+> A separate **ARM64EC** build is available for Nuendo 14 WoA:
+> `.\scripts\build-arm64-asio.ps1 -Architecture ARM64EC`. Select the same
+> architecture when registering/testing. The pure ARM64 DLL is not loadable
+> by an ARM64EC/x64 host; actual Nuendo operation still needs validation.
+> Set **ASIO buffer size (samples)** in the Inferno control panel (64-2048),
+> save, then reopen the ASIO device or restart Nuendo to apply the preference.
+
 ## What is ASIO?
 
 **ASIO (Audio Stream Input/Output)** is a low-latency audio protocol developed by Steinberg for professional Digital Audio Workstations (DAWs). Unlike standard Windows audio APIs (WASAPI, DirectSound), ASIO provides:

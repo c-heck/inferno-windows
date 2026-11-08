@@ -40,11 +40,12 @@ pub(crate) mod samples_utils;
 pub(crate) mod saved_settings;
 pub(crate) mod settings;
 pub(crate) mod tx_multicasts;
+pub(crate) mod traffic;
 
 pub use crate::common::{Clock, ClockDiff, Sample};
 pub use crate::media_clock::{MediaClock, RealTimeClockReceiver};
 pub use crate::ring_buffer::{ExternalBufferParameters, PositionReportDestination};
-pub use settings::Settings;
+pub use settings::{ControlHook, ControlRequest, Settings};
 pub type AtomicSample = atomic::Atomic<Sample>;
 
 use channels_subscriber::{ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering};
@@ -69,6 +70,12 @@ pub struct TxPusher {
 }
 
 impl TxPusher {
+  /// Pushes a block at an explicit media-clock timestamp, allowing a disciplined host clock.
+  pub fn push_channels_at(&mut self, timestamp: usize, channel_data: &[Vec<Sample>]) {
+    self.timestamp = timestamp;
+    self.push_channels(channel_data);
+  }
+
   /// Push a batch of PCM frames — one `Vec<Sample>` per channel.
   ///
   /// All channel slices must have the same number of frames.
@@ -111,6 +118,12 @@ pub struct DeviceServer {
 
 impl DeviceServer {
   pub async fn start(settings: settings::Settings) -> Self {
+    let clock_receiver = start_clock_receiver(settings.clock_path.clone());
+    Self::start_with_clock(settings, clock_receiver).await
+  }
+
+  /// Uses a caller-owned clock source; no system-clock fallback is added.
+  pub async fn start_with_clock(settings: settings::Settings, clock_receiver: ClockReceiver) -> Self {
     let self_info = Arc::new(settings.self_info.clone());
     let settings = Arc::new(settings);
     let state_storage = Arc::new(StateStorage::new(&self_info));
@@ -129,7 +142,6 @@ impl DeviceServer {
     let (mcast_tx, mcast_rx) = mpsc::channel(100);
 
     info!("clock path: {:?}", settings.clock_path);
-    let clock_receiver = start_clock_receiver(settings.clock_path.clone());
 
     info!("waiting for clock");
     let shared_media_clock = make_shared_media_clock(&clock_receiver, settings.use_safe_clock).await;
@@ -158,6 +170,7 @@ impl DeviceServer {
         channels_sub_rx.clone(),
         flows_tx.clone(),
         tx_multicasts.clone(),
+        settings.control_hook.clone(),
         shdn_recv1,
       )),
       tokio::spawn(cmc_server::run_server(self_info.clone(), shdn_recv2)),
@@ -372,7 +385,9 @@ impl DeviceServer {
       current_timestamp.clone(),
       on_transfer,
     );
-    flows_tx_handle.load_state().await.log_and_forget();
+    if self.settings.restore_tx_flows {
+      flows_tx_handle.load_state().await.log_and_forget();
+    }
     *self.flows_tx.lock().await = Some(flows_tx_handle);
     let txm = TransmitMulticasts::new(
       self.tx_multicasts_by_channel.clone(),
@@ -457,6 +472,11 @@ impl DeviceServer {
     let start_timestamp =
       ((now_ns as u128 * sample_rate as u128) / 1_000_000_000u128) as usize;
 
+    self.transmit_with_push_at(channels, start_timestamp).await
+  }
+
+  /// Seeds TX buffers in the caller's media-clock timescale rather than system time.
+  pub async fn transmit_with_push_at(&mut self, channels: usize, start_timestamp: usize) -> TxPusher {
     // 2^17 = 131072 samples ≈ 2.7 s at 48 kHz — must be power of 2
     const BUF_SIZE: usize = 131072;
 
@@ -471,6 +491,21 @@ impl DeviceServer {
     self.transmit(None, outputs, current_timestamp, None).await;
 
     TxPusher { inputs, timestamp: start_timestamp }
+  }
+
+  /// Replaces the per-channel signal level sources reported to Dante Controller (0x8002
+  /// heartbeat). Levels use the Dante scale: -2 × dBFS per byte. None keeps the current source.
+  pub fn set_level_suppliers(
+    &self,
+    rx: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
+    tx: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
+  ) {
+    if let Some(rx) = rx {
+      *self.rx_peaks_supplier.write().unwrap() = rx;
+    }
+    if let Some(tx) = tx {
+      *self.tx_peaks_supplier.write().unwrap() = tx;
+    }
   }
 
   pub fn get_realtime_clock_receiver(&self) -> RealTimeClockReceiver {
@@ -491,5 +526,37 @@ impl DeviceServer {
     self.shutdown_todo.await;
     self.clock_receiver.stop().await.unwrap();
     info!("shutdown ok");
+  }
+}
+
+#[cfg(test)]
+mod asio_push_tests {
+  use super::*;
+
+  #[test]
+  fn push_channels_at_uses_explicit_media_clock() {
+    let (input, output) = ring_buffer::new_owned::<Sample>(64, 1000, 0);
+    let mut pusher = TxPusher { inputs: vec![input], timestamp: 1000 };
+    pusher.push_channels_at(1010, &[vec![i32::MIN, 0, 123 << 8, i32::MAX]]);
+    let mut samples = [0; 4];
+    let result = output.read_at(1010, &mut samples);
+    assert_eq!(result.useful_start_index, 0);
+    assert_eq!(result.useful_end_index, 4);
+    assert_eq!(samples, [i32::MIN, 0, 123 << 8, i32::MAX]);
+    assert_eq!(pusher.timestamp, 1014);
+  }
+
+  #[test]
+  fn push_channels_at_wraps_without_losing_samples() {
+    let timestamp = usize::MAX - 1;
+    let (input, output) = ring_buffer::new_owned::<Sample>(64, timestamp, 0);
+    let mut pusher = TxPusher { inputs: vec![input], timestamp };
+    pusher.push_channels_at(timestamp, &[vec![256, -256, 512, -512]]);
+    let mut samples = [0; 4];
+    let result = output.read_at(timestamp, &mut samples);
+    assert_eq!(result.useful_start_index, 0);
+    assert_eq!(result.useful_end_index, 4);
+    assert_eq!(samples, [256, -256, 512, -512]);
+    assert_eq!(pusher.timestamp, 2);
   }
 }

@@ -43,6 +43,7 @@ struct Multicaster<'s> {
   // Each block group has its own seqnum counter, matching the Shure MXWANI8 pattern.
   util_block_seqnum: u16,    // for 0x8000+0x8001 packets
   latency_block_seqnum: u16, // for 0x8003+0x8004 packets
+  last_traffic: Option<(std::time::Instant, u64, u64)>,
 }
 
 impl<'s> Multicaster<'s> {
@@ -84,6 +85,7 @@ impl<'s> Multicaster<'s> {
       get_peaks,
       util_block_seqnum: 1,
       latency_block_seqnum: 1,
+      last_traffic: None,
     };
     write_str_to_buffer(&mut r.vendor, 0, 8, &self_info.vendor_string);
     return r;
@@ -184,6 +186,16 @@ impl<'s> Multicaster<'s> {
       .flatten()
   }
 
+  /// Bytes per second since the previous heartbeat, and the cumulative receive error count.
+  fn traffic_rates(&mut self) -> (u32, u32, u32) {
+    let now = std::time::Instant::now();
+    let (tx, rx, errors) = super::traffic::snapshot();
+    let (last_time, last_tx, last_rx) = self.last_traffic.replace((now, tx, rx)).unwrap_or((now, tx, rx));
+    let elapsed = now.duration_since(last_time).as_secs_f64();
+    let rate = |delta: u64| if elapsed > 0.0 { (delta as f64 / elapsed).min(u32::MAX as f64) as u32 } else { 0 };
+    (rate(tx.wrapping_sub(last_tx)), rate(rx.wrapping_sub(last_rx)), errors.min(u32::MAX as u64) as u32)
+  }
+
   async fn send_heartbeat(&mut self) {
     let freq_offset_opt = self.get_freq_offset_ppb();
 
@@ -207,10 +219,35 @@ impl<'s> Multicaster<'s> {
         bytes.write_u16(0x0000);
         bytes.write_u16(0x0001);
         bytes.write_u16(0x0010);
-        bytes.write_u32(0); // TX bytes/sec
-        bytes.write_u32(0); // RX bytes/sec
+        let (tx_rate, rx_rate, rx_errors) = self.traffic_rates();
+        bytes.write_u32(tx_rate); // TX bytes/sec
+        bytes.write_u32(rx_rate); // RX bytes/sec
         bytes.write_u32(0); // TX errors
-        bytes.write_u32(0); // RX errors
+        bytes.write_u32(rx_errors); // RX errors (missing audio packets, cumulative)
+
+        // 0x8002 signal presence: one level byte per channel, Dante scale -2 × dBFS.
+        let (rx_levels, tx_levels) = (self.get_peaks)();
+        if !rx_levels.is_empty() || !tx_levels.is_empty() {
+          let levels = tx_levels.len() + rx_levels.len();
+          let record_len = 24 + levels.div_ceil(4) * 4;
+          bytes.write_u16(record_len as u16);
+          bytes.write_u16(0x8002);
+          bytes.write_u16(4);
+          bytes.write_u16(record_len as u16 - 12);
+          bytes.write_u16(ctr);
+          bytes.write_u16(0);
+          bytes.write_u16(tx_levels.len() as u16);
+          bytes.write_u16(0);
+          bytes.write_u16(rx_levels.len() as u16);
+          bytes.write_u16(0);
+          bytes.write_u16(24);
+          bytes.write_u16(0);
+          bytes.write_bytes(&tx_levels);
+          bytes.write_bytes(&rx_levels);
+          for _ in levels..record_len - 24 {
+            bytes.write_u8(0);
+          }
+        }
 
         bytes.write_u16(16);
         bytes.write_u16(0x8001);
@@ -263,8 +300,9 @@ impl<'s> Multicaster<'s> {
           bytes.write_u16(0);
           bytes.write_u16(20);
           bytes.write_u16(0);
-          for _ in 0..flows_count {
-            bytes.write_u32(0);
+          for opt in flows_info.iter() {
+            // Cumulative, like Dante hardware reports it.
+            bytes.write_u32(opt.as_ref().map(|fi| fi.late_packets.load(Ordering::Relaxed)).unwrap_or(0));
           }
           // lock guard dropped here, before the await
           bytes.as_bytes().to_vec()
@@ -315,7 +353,11 @@ impl<'s> Multicaster<'s> {
     };
     let required_prefix = format!("clock-stats.{}0000", hex::encode(self.self_info.mac_address.octets()));
     let mut master_clock = None;
-    if let Ok(readdir) = std::fs::read_dir("/tmp") {
+    #[cfg(windows)]
+    let stats_dir = std::env::temp_dir();
+    #[cfg(not(windows))]
+    let stats_dir = std::path::PathBuf::from("/tmp");
+    if let Ok(readdir) = std::fs::read_dir(stats_dir) {
       for entry in readdir {
         if let Ok(entry) = entry {
           if entry.file_name().to_string_lossy().starts_with(&required_prefix) {
@@ -429,6 +471,15 @@ pub async fn run_server(
             mcaster.send(
               mcaster.device_info_destination, 0xffff, [0x07, 0x2a, 0x00, 0x78, 0, 0, 0, 0],
               &[0, 0, 0, 3, 0, 0, 0, 0]
+            ).await;
+          }
+          [0x07, _, 0x10, 0x08, 0, 0, 0, _] => {
+            // Lock Status query from conmon. Real devices (SFN-MADI, O2R) multicast 0x1009
+            // with a 16-byte body; all zeros = unlocked. Unanswered, Dante Controller logs
+            // "Timed out 3 times awaiting a reply to message 'Lock Status'".
+            mcaster.send(
+              mcaster.device_info_destination, 0xffff, [0x07, 0x2a, 0x10, 0x09, 0, 0, 0, 0],
+              &[0; 16]
             ).await;
           }
           _ => {

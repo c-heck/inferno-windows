@@ -137,6 +137,13 @@ impl<P: ProxyToSamplesBuffer> RealTimeSamplesReceiver<P> {
       true
     }
   }
+  /// Negotiated receive latency for a connected channel, in sample frames.
+  pub fn channel_latency_samples(&mut self, channel_index: usize) -> Option<usize> {
+    let receiver = &mut self.channels[channel_index];
+    receiver.update();
+    receiver.get().as_ref().map(|channel| channel.latency_samples)
+  }
+
   pub fn clock(&mut self) -> &MediaClock {
     if self.clock_recv.update() {
       if let Some(ovl) = self.clock_recv.get() {

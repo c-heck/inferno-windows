@@ -42,6 +42,7 @@ const BUFFERED_SAMPLES_PER_CHANNEL: usize = 65536;
 pub const SELECT_THRESHOLD: Duration = Duration::from_millis(100);
 pub const PROCESS_EVENTS_INTERVAL: Duration = Duration::from_millis(33);
 pub const MIN_SLEEP: Duration = Duration::from_millis(0); // to save CPU cycles, TODO: make it configurable via some "eco mode" flag
+const MIN_MAX_LAG_NS: usize = 20_000_000;
 
 // it's better to have the clock in the past than in the future - otherwise Dante devices receiving from us go mad and fart
 fn clock_offset_ns() -> i64 {
@@ -188,6 +189,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         }
         let to_send = 9 + stride * flow.fpp;
         if let Ok(written) = flow.socket.send(&pbuff[0..to_send]) {
+          super::traffic::add_tx(written);
           if written == to_send {
             flow.next_ts = flow.next_ts.wrapping_add(flow.fpp.try_into().unwrap());
           } else {
@@ -510,8 +512,9 @@ impl FlowsTransmitter {
         clock_recv,
         srate,
         tx_latency_ns,
-        // we set max_lag_samples to tx latency because it doesn't make sense to send samples older than that
-        (tx_latency_ns as u64 * srate as u64 / 1_000_000_000u64).try_into().unwrap(),
+        // Catch up after scheduler stalls shorter than this instead of skipping ahead: a few late
+        // packets are better than a timestamp discontinuity (always audible at the receiver).
+        (tx_latency_ns.max(MIN_MAX_LAG_NS) as u64 * srate as u64 / 1_000_000_000u64).try_into().unwrap(),
         channels_outputs,
         start_time_rx,
         current_timestamp,
@@ -703,7 +706,7 @@ impl FlowsTransmitter {
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     }
   }
-  async fn scan_expired(&mut self) {
+  pub async fn scan_expired(&mut self) {
     let expired_ids: Vec<u32> = self
       .flows
       .iter()

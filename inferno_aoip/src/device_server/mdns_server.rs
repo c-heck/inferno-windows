@@ -45,7 +45,11 @@ impl DeviceMDNSResponder {
         ServiceBuilder::new(service_type("_netaudio-arc"), hostname.clone(), self_info.arc_port)
           .unwrap()
           .add_ip_address(IpAddr::V4(self_info.ip_address))
-          .add_txt_truncated("arcp_vers=2.2.0")
+          // Dante Controller speaks ARC with the advertised version (echoed as the packet start
+          // code). Below 0x2600 it ignores the max TX/RX flow fields of the 0x1000 reply and
+          // treats every reported flow id as invalid, resetting the device session in a loop.
+          // 2.7.41 (0x2729) matches the Yamaha DCM reference whose reply layouts we mirror.
+          .add_txt_truncated("arcp_vers=2.7.41")
           .add_txt_truncated("arcp_min=0.2.4")
           .add_txt_truncated("router_vers=4.0.2")
           .add_txt_truncated(kv("router_info", &self_info.board_name))

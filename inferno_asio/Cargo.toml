@@ -2,9 +2,23 @@
 name = "inferno_asio"
 version = "0.1.0"
 edition = "2021"
-description = "ASIO host for Inferno audio engine (stub crate, native implementation planned)"
-license = "Apache-2.0"
+description = "Experimental native Windows ARM64/x64 ASIO device for Inferno AoIP"
+license = "GPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+inferno_aoip = { path = "../inferno_aoip" }
+usrvclock = { path = "../usrvclock" }
+tokio = { version = "1.36", features = ["rt-multi-thread", "net", "time", "sync"] }
+socket2 = { version = "0.5", features = ["all"] }
+log = "0.4"
+# Forward inferno_aoip tracing events to the `log` file logger (no tracing subscriber is installed).
+tracing = { version = "0.1", features = ["log"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+netdev = "0.32"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Storage_FileSystem", "Win32_UI_Controls", "Win32_Graphics_Dwm"] }
 
 [dev-dependencies]

@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::{common::*, device_info, device_info::DeviceInfo};
+#[cfg(not(windows))]
 use platform_dirs::AppDirs;
 use serde::{Deserialize, Serialize};
 use toml;
@@ -35,18 +36,26 @@ pub struct StateStorage {
 
 impl StateStorage {
   pub fn new(self_info: &DeviceInfo) -> Self {
-    let app_dirs = match AppDirs::new(Some("inferno_aoip"), false) {
-      Some(dirs) => dirs,
-      None => {
-        error!("failed to determine application state directory, using current directory");
-        let app_dirs = AppDirs::new(None, false).unwrap_or_else(|| {
-          panic!("unable to create AppDirs with fallback");
-        });
-        app_dirs
-      }
+    #[cfg(windows)]
+    let state_dir = dirs::data_local_dir()
+      .expect("unable to determine local application state directory")
+      .join("inferno_aoip");
+    #[cfg(not(windows))]
+    let state_dir = {
+      let app_dirs = match AppDirs::new(Some("inferno_aoip"), false) {
+        Some(dirs) => dirs,
+        None => {
+          error!("failed to determine application state directory, using current directory");
+          let app_dirs = AppDirs::new(None, false).unwrap_or_else(|| {
+            panic!("unable to create AppDirs with fallback");
+          });
+          app_dirs
+        }
+      };
+      app_dirs.state_dir
     };
 
-    let base_dir = match app_dirs.state_dir.to_str() {
+    let base_dir = match state_dir.to_str() {
       Some(s) => s.to_owned(),
       None => {
         error!("state directory path is not UTF-8, using current directory");

@@ -11,7 +11,7 @@ use super::flows_tx::{FlowsTransmitter, MAX_CHANNELS_IN_FLOW, MAX_FLOWS as MAX_T
 use crate::protocol::mcast::MulticastMessage;
 use super::mdns_server::DeviceMDNSResponder;
 use crate::net_utils::UdpSocketWrapper;
-use crate::protocol::mcast::make_channel_change_notification;
+use crate::protocol::mcast::{make_channel_change_notification, make_property_change_notification};
 use crate::protocol::req_resp::{self, CODE_OK};
 use crate::protocol::req_resp::HEADER_LENGTH;
 use crate::protocol::proto_arc::*;
@@ -41,11 +41,24 @@ pub async fn run_server(
   mut channels_sub_rx: watch::Receiver<Option<Arc<ChannelsSubscriber>>>,
   flows_tx: Arc<Mutex<Option<FlowsTransmitter>>>,
   tx_multicasts: Arc<Mutex<Option<TransmitMulticasts>>>,
+  control_hook: Option<super::settings::ControlHook>,
   shutdown: BroadcastReceiver<()>,
 ) {
   let mut subscriber = None;
   let mut saved_channels = SavedChannelsSettings::load(state_storage, self_info.clone());
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.arc_port, shutdown).await;
+  if control_hook.is_some() {
+    // Controller caches device settings across restarts; announce them so it shows the running latency.
+    let mcast = mcast.clone();
+    tokio::spawn(async move {
+      for delay in [1, 4, 10] {
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        if mcast.send(make_property_change_notification()).await.is_err() {
+          break;
+        }
+      }
+    });
+  }
   let mut conn = req_resp::Connection::new(server);
   let mut recv_buff = net_utils::ReceiveBuffer::new();
   while conn.should_work() {
@@ -297,29 +310,71 @@ pub async fn run_server(
         query_tx_flows::OPCODE => {
           // query TX flows
           let content = request.content();
+          let mut flows_tx_guard = flows_tx.lock().await;
+          // Unicast flows whose receiver stopped sending keepalives must not be advertised.
+          if let Some(tx) = flows_tx_guard.as_mut() {
+            tx.scan_expired().await;
+          }
           let (code, response) = paginate_make_response(
             &mut conn,
             content,
             MAX_TX_FLOWS.min(16).try_into().unwrap(),
-            flows_tx.lock().await.as_ref().map(|tx|tx.get_flows_info()).unwrap_or(&vec![]).iter().enumerate(),
+            flows_tx_guard.as_ref().map(|tx|tx.get_flows_info()).unwrap_or(&vec![]).iter().enumerate(),
             |(flow_index, flow_opt), bytes| -> Option<u16> {
               flow_opt.as_ref().map(|flow_info| -> u16 {
+                // Layout as sent by real devices (Yamaha O2R): header, channel list, footer,
+                // socket descriptor, names descriptor, strings - all pointing forward. The
+                // previous backward layout made Dante Controller reset the device session
+                // right after every 0x2200 reply whenever a TX flow existed.
                 let flow_id = flow_index + 1;
                 let flow_name = format!("{}_{}", flow_id, self_info.process_id);
-                let local_tx_flow_name_offset = write_0term_str_to_bytebuffer(bytes, &flow_name);
-                let remote_hostname_offset = write_0term_str_or_0_to_bytebuffer(bytes, flow_info.rx_hostname.as_deref());
-                let remote_rx_flow_name_offset = write_0term_str_or_0_to_bytebuffer(bytes, flow_info.rx_flow_name.as_deref());
-                let is_multicast = remote_hostname_offset == 0 && remote_rx_flow_name_offset == 0;
+                let is_multicast = flow_info.rx_hostname.is_none() && flow_info.rx_flow_name.is_none();
+                let channels_count = flow_info.local_channel_indices.len();
 
                 align_wpos(bytes, 4);
-                let receiver_socket_descriptor_offset = bytes.get_wpos().try_into().unwrap();
+                let main_descriptor_offset = bytes.get_wpos();
+                let receiver_socket_descriptor_offset = (main_descriptor_offset + 18 + 2 * channels_count + 2 + 3) & !3;
+                let names_descriptor_offset = receiver_socket_descriptor_offset + 8;
+                let mut strings_pos = names_descriptor_offset + 20;
+                let mut place_str = |s: Option<&str>| -> u16 {
+                  match s {
+                    Some(s) => { let o = strings_pos; strings_pos += s.len() + 1; o.try_into().unwrap() },
+                    None => 0,
+                  }
+                };
+                let local_tx_flow_name_offset = place_str(Some(&flow_name));
+                let remote_hostname_offset = place_str(flow_info.rx_hostname.as_deref());
+                let remote_rx_flow_name_offset = place_str(flow_info.rx_flow_name.as_deref());
+
+                bytes.write_bytes(query_tx_flows::FlowDescriptorHeader {
+                  flow_id: flow_id.try_into().unwrap(),
+                  flow_type: if is_multicast { 2 } else { 0x11 },
+                  sample_rate: self_info.sample_rate,
+                  unknown1_0: 0,
+                  bits_per_sample: self_info.bits_per_sample.into(),
+                  unknown2_1: 1,
+                  channels_count: channels_count.try_into().unwrap(),
+                  receiver_socket_descriptor_offset: receiver_socket_descriptor_offset.try_into().unwrap(),
+                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+
+                for ch in &flow_info.local_channel_indices {
+                  bytes.write_u16(ch.map(|i| i + 1).unwrap_or(0).try_into().unwrap());
+                }
+
+                bytes.write_bytes(query_tx_flows::FlowDescriptorFooter {
+                  names_descriptor_offset: names_descriptor_offset.try_into().unwrap(),
+                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+
+                align_wpos(bytes, 4);
+                debug_assert_eq!(bytes.get_wpos(), receiver_socket_descriptor_offset);
                 bytes.write_bytes(DestinationSocketDescriptor {
-                  unknown1_8002: 0x8002,
+                  // Real devices (O2R, SFN-MADI) send 0x0802 here.
+                  unknown1_8002: 0x0802,
                   port: flow_info.dst_port,
                   addr: flow_info.dst_addr.octets(),
                 }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
-                let names_descriptor_offset = bytes.get_wpos().try_into().unwrap();
+                debug_assert_eq!(bytes.get_wpos(), names_descriptor_offset);
                 bytes.write_bytes(query_tx_flows::NamesDescriptor {
                   unknown1_a00: 0xa00,
                   unknown2_1: 1,
@@ -330,25 +385,10 @@ pub async fn run_server(
                   ..Default::default()
                 }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
-                let main_descriptor_offset = bytes.get_wpos();
-                bytes.write_bytes(query_tx_flows::FlowDescriptorHeader {
-                  flow_id: flow_id.try_into().unwrap(),
-                  flow_type: if is_multicast { 2 } else { 0x11 },
-                  sample_rate: self_info.sample_rate,
-                  unknown1_0: 0,
-                  bits_per_sample: self_info.bits_per_sample.into(),
-                  unknown2_1: 1,
-                  channels_count: flow_info.local_channel_indices.len().try_into().unwrap(),
-                  receiver_socket_descriptor_offset,
-                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
-
-                for ch in &flow_info.local_channel_indices {
-                  bytes.write_u16(ch.map(|i| i + 1).unwrap_or(0).try_into().unwrap());
-                }
-
-                bytes.write_bytes(query_tx_flows::FlowDescriptorFooter {
-                  names_descriptor_offset,
-                }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+                write_0term_str_to_bytebuffer(bytes, &flow_name);
+                write_0term_str_or_0_to_bytebuffer(bytes, flow_info.rx_hostname.as_deref());
+                write_0term_str_or_0_to_bytebuffer(bytes, flow_info.rx_flow_name.as_deref());
+                debug_assert_eq!(bytes.get_wpos(), strings_pos);
 
                 main_descriptor_offset.try_into().unwrap()
               })
@@ -475,30 +515,43 @@ pub async fn run_server(
               chsub.flows_info().read().unwrap().iter().enumerate(),
               |(flow_index, flow_opt), bytes| -> Option<u16> {
                 flow_opt.as_ref().map(|flow_info| -> u16 {
-                  align_wpos(bytes, 4);
-                  let receiver_socket_descriptor_offset = bytes.get_wpos().try_into().unwrap();
-                  bytes.write_bytes(DestinationSocketDescriptor {
-                    unknown1_8002: 0x8002,
-                    port: flow_info.rx_port,
-                    addr: self_info.ip_address.octets(),
-                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
-
-                  let descriptor2_offset = bytes.get_wpos().try_into().unwrap();
-                  bytes.write_bytes(query_rx_flows::Descriptor2 {
-                    unknown1_9: 9,
-                    unknown2_1: 1,
-                    unknown3_800: 0x800,
-                    unknown4_0: 0,
-                    latency_ns: (flow_info.latency_samples as u64 * 1_000_000_000u64 / self_info.sample_rate as u64).try_into().unwrap(),
-                    unknown5_0: 0,
-                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
-
+                  // Layout as sent by real devices (Yamaha O2R, SFN-MADI): header, bitmask
+                  // offsets, footer, bitmasks, socket descriptor, descriptor2 - all pointing
+                  // forward. Placing socket/descriptor2 *before* the header (as previously
+                  // done) makes Dante Controller reset the device session after every 0x3200
+                  // query (3-5 full ARC re-queries per second, flashing/unpatchable channels).
                   let req_bits_in_mask = flow_info.channels_map.iter().map(|bv|bv.len()).max().unwrap_or(0);
                   let words_per_bitmask = ((req_bits_in_mask+15) / 16).max(1);
+                  let channels_count = flow_info.channels_map.len();
 
-                  let bitmask_offsets = flow_info.channels_map.iter().map(|mask| {
+                  align_wpos(bytes, 4);
+                  let main_descriptor_offset = bytes.get_wpos();
+                  let bitmasks_offset = main_descriptor_offset + 20 + 2 * channels_count + 2;
+                  let bitmasks_end = bitmasks_offset + 2 * words_per_bitmask * channels_count;
+                  let receiver_socket_descriptor_offset = (bitmasks_end + 3) & !3;
+                  let descriptor2_offset = receiver_socket_descriptor_offset + 8;
+
+                  bytes.write_bytes(query_rx_flows::FlowDescriptorHeader {
+                    flow_id: (flow_index+1).try_into().unwrap(),
+                    unknown1_1: 1,
+                    sample_rate: self_info.sample_rate,
+                    unknown2_0: 0,
+                    bits_per_sample: self_info.bits_per_sample.into(),
+                    unknown3_1: 1,
+                    channels_count: channels_count.try_into().unwrap(),
+                    words_per_bitmask: words_per_bitmask.try_into().unwrap(),
+                    receiver_socket_descriptor_offset: receiver_socket_descriptor_offset.try_into().unwrap(),
+                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+                  for i in 0..channels_count {
+                    bytes.write_u16((bitmasks_offset + 2 * words_per_bitmask * i).try_into().unwrap());
+                  }
+                  bytes.write_bytes(query_rx_flows::FlowDescriptorFooter {
+                    descriptor2_offset: descriptor2_offset.try_into().unwrap(),
+                  }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
+                  debug_assert_eq!(bytes.get_wpos(), bitmasks_offset);
+
+                  for mask in flow_info.channels_map.iter() {
                     let mut chi = 0;
-                    let pos = bytes.get_wpos();
                     for _ in 0..words_per_bitmask {
                       let mut word: u16 = 0;
                       let mut single_bit = 1;
@@ -509,27 +562,25 @@ pub async fn run_server(
                       }
                       bytes.write_u16(word);
                     }
-                    pos
-                  }).collect_vec();
+                  }
 
                   align_wpos(bytes, 4);
-                  let main_descriptor_offset = bytes.get_wpos();
-                  bytes.write_bytes(query_rx_flows::FlowDescriptorHeader {
-                    flow_id: (flow_index+1).try_into().unwrap(),
-                    unknown1_1: 1,
-                    sample_rate: self_info.sample_rate,
-                    unknown2_0: 0,
-                    bits_per_sample: self_info.bits_per_sample.into(),
-                    unknown3_1: 1,
-                    channels_count: flow_info.channels_map.len().try_into().unwrap(),
-                    words_per_bitmask: words_per_bitmask.try_into().unwrap(),
-                    receiver_socket_descriptor_offset,
+                  debug_assert_eq!(bytes.get_wpos(), receiver_socket_descriptor_offset);
+                  bytes.write_bytes(DestinationSocketDescriptor {
+                    // Real devices (O2R, SFN-MADI) send 0x0802 here.
+                    unknown1_8002: 0x0802,
+                    port: flow_info.rx_port,
+                    addr: self_info.ip_address.octets(),
                   }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
-                  for pos in bitmask_offsets {
-                    bytes.write_u16(pos.try_into().unwrap());
-                  }
-                  bytes.write_bytes(query_rx_flows::FlowDescriptorFooter {
-                    descriptor2_offset
+
+                  debug_assert_eq!(bytes.get_wpos(), descriptor2_offset);
+                  bytes.write_bytes(query_rx_flows::Descriptor2 {
+                    unknown1_9: 9,
+                    unknown2_1: 1,
+                    unknown3_800: 0x800,
+                    unknown4_0: 0,
+                    latency_ns: (flow_info.latency_samples as u64 * 1_000_000_000u64 / self_info.sample_rate as u64).try_into().unwrap(),
+                    unknown5_0: 0,
                   }.binary_serialize_to_array(binary_serde::Endianness::Big).as_slice());
 
                   main_descriptor_offset.try_into().unwrap()
@@ -542,14 +593,21 @@ pub async fn run_server(
           conn.respond_with_code(code, &response).await;
         }
 
-        0x1100 => {
+        properties::READ_OPCODE => {
           // used by DC
           // received unknown opcode1 0x1100, content 00130201820482050210021182188219830183028306031003110303802100f08060002200630064
           // whole packet: "272900320e621100000000130201820482050210021182188219830183028306031003110303802100f08060002200630064"
 
           // ???
           // looks like something dependent on active connections
-          let content = [0u8; 110];
+          let content = match properties::read(request.content(), &self_info) {
+            Ok(content) => content,
+            Err(error) => {
+              error!("ARC property query failed: {error}");
+              conn.respond_with_code(0x23, &[]).await;
+              continue;
+            }
+          };
           // XXX: not necessary
           /* let content = [
             0x12, 0x12, 0x02, 0x01, 0x00, 0x01, 0x82, 0x04, 0x00, 0x54, 0x82, 0x05, 0x00, 0x58,
@@ -564,9 +622,13 @@ pub async fn run_server(
           ]; */
           conn.respond(&content).await;
         }
-        0x1102 => {
+        properties::DIRECTORY_OPCODE => {
           // identical for all low channels count devices
-          let content = [0u8; 94];
+          // Upstream's all-zero reply; with a control hook, advertise writable latency instead.
+          let content = match &control_hook {
+            Some(_) => properties::directory(),
+            None => vec![0u8; 94],
+          };
           // XXX not necessary
           /* let content = [
             /* number of items, 2B: */ 0x00, 0x17, 0x80, 0x20, 0x00, 0x01,
@@ -579,6 +641,50 @@ pub async fn run_server(
           ]; */
           conn.respond(&content).await;
         }
+        properties::WRITE_OPCODE => {
+          let Some(hook) = &control_hook else {
+            conn.respond_with_code(0x0030, &[]).await;
+            continue;
+          };
+          match properties::parse_latency_write(request.content()) {
+            Ok(latency_ns) if hook(super::settings::ControlRequest::SetLatencyNs(latency_ns)) => {
+              info!("Controller set latency to {latency_ns} ns");
+              conn.respond(&properties::latency_write_reply(latency_ns)).await;
+            }
+            Ok(latency_ns) => {
+              warn!("latency {latency_ns} ns rejected by host");
+              conn.respond_with_code(0x0023, &[]).await;
+            }
+            Err(e) => {
+              warn!("ARC property write {}: {e}", hex::encode(request.content()));
+              conn.respond_with_code(0x0023, &[]).await;
+            }
+          }
+        }
+
+        SET_DEVICE_NAME_OPCODE => {
+          let Some(hook) = &control_hook else {
+            conn.respond_with_code(0x0030, &[]).await;
+            continue;
+          };
+          match parse_device_name(request.content()) {
+            Ok(name) if hook(super::settings::ControlRequest::Rename(name.clone())) => {
+              info!("Controller renamed device to {name:?}");
+              let mut reply = name.unwrap_or_default().into_bytes();
+              reply.push(0);
+              conn.respond(&reply).await;
+            }
+            Ok(name) => {
+              warn!("device name {name:?} rejected by host");
+              conn.respond_with_code(0x0023, &[]).await;
+            }
+            Err(e) => {
+              warn!("ARC rename: {e}");
+              conn.respond_with_code(0x0023, &[]).await;
+            }
+          }
+        }
+
         0x3300 => {
           // WTF: this is necessary to avoid 'clock domain mismatch' error in DC
           conn.respond(&[0x38, 0x00, 0x38, 0xfd, 0x38, 0xfe, 0x38, 0xff]).await;
@@ -630,6 +736,14 @@ pub async fn run_server(
           }
         }
 
+        0x2204 => {
+          // Dante Controller follows every TX flow query (0x2200) with 0x2204 (same paging args).
+          // A Yamaha O2R (Dante firmware) answers with result 0x0030 and no body; answering
+          // 0xFFFF makes Controller retry in a tight loop (~1 kHz), which keeps resetting its
+          // router session (flashing/unpatchable channels, Controller crash on reset).
+          conn.respond_with_code(0x0030, &[]).await;
+        }
+
         0x3014 => {
           // netaudio subscription remove (used by network-audio-controller)
           // received unknown opcode1 0x3014, content 000100000002
@@ -646,9 +760,14 @@ pub async fn run_server(
 
         0x0090 => {
           // Device reboot request from DC
-          warn!("DC reboot request received — restarting InfernoAoIP process");
           conn.respond_with_code(CODE_OK, &[]).await;
-          
+          if let Some(hook) = &control_hook {
+            warn!("DC reboot request received — asking the host to restart the device");
+            hook(super::settings::ControlRequest::Reboot);
+            continue;
+          }
+          warn!("DC reboot request received — restarting InfernoAoIP process");
+
           // Schedule graceful restart after 1 second to allow response to be sent
           tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;

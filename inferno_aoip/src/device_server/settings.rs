@@ -256,7 +256,23 @@ pub struct Settings {
   pub rx_buffer_samples: usize,
   /// Latency reference in samples (default 4800 = 100ms at 48kHz)
   pub latency_ref_samples: usize,
+  /// Recreate saved unicast TX flows on startup (receivers normally re-request them)
+  pub restore_tx_flows: bool,
+  /// Handles Dante Controller configuration requests; None rejects them.
+  pub control_hook: Option<ControlHook>,
 }
+
+/// Configuration change requested by Dante Controller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControlRequest {
+  /// None resets to the default name.
+  Rename(Option<String>),
+  SetLatencyNs(u32),
+  Reboot,
+}
+
+/// Returns true when the request was accepted.
+pub type ControlHook = std::sync::Arc<dyn Fn(ControlRequest) -> bool + Send + Sync>;
 
 impl Settings {
   pub fn new(
@@ -318,6 +334,8 @@ impl Settings {
       fpp_override: None,
       rx_buffer_samples: 524288,
       latency_ref_samples: 4800,
+      restore_tx_flows: true,
+      control_hook: None,
     };
 
     // the following should be harmless, as the application still has the chance to overwrite it

@@ -13,8 +13,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use custom_error::custom_error;
-use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
-use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+use windows_sys::Win32::Foundation::FILETIME;
+use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 
 const OVERLAY_SIZE_BYTES: usize = 40;
 const PROTOCOL_MAJOR_VERSION: u16 = 1;
@@ -122,7 +123,8 @@ impl SafeClock {
         }
         
         // Get initial wall-clock anchor using GetSystemTimePreciseAsFileTime
-        let ft = unsafe { GetSystemTimePreciseAsFileTime() };
+        let mut ft = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        unsafe { GetSystemTimePreciseAsFileTime(&mut ft); }
         
         let filetime = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
         
@@ -186,7 +188,8 @@ pub const DEFAULT_SERVER_SOCKET_PATH: &str = r"\\.\pipe\ptp-usrvclock";
 /// Get precise system time in nanoseconds using GetSystemTimePreciseAsFileTime.
 /// Provides ~100ns resolution on modern Windows systems.
 fn get_precise_system_time_ns() -> i64 {
-    let ft = unsafe { GetSystemTimePreciseAsFileTime() };
+    let mut ft = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    unsafe { GetSystemTimePreciseAsFileTime(&mut ft); }
     let filetime = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
     // Convert FILETIME (100ns intervals since 1601-01-01) to ns since Unix epoch
     let unix_100ns = if filetime >= 116_444_736_000_000_000u64 {
@@ -218,6 +221,29 @@ pub struct AsyncClient {
 
 #[cfg(feature = "tokio")]
 impl AsyncClient {
+    /// Bridges an explicitly supplied clock instead of silently using system time.
+    pub fn from_updates(mut updates: tokio::sync::watch::Receiver<Option<ClockOverlay>>) -> Self {
+        let initial = *updates.borrow_and_update();
+        let (sender, _) = tokio::sync::watch::channel(initial);
+        let tx = sender.clone();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let join_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    changed = updates.changed() => {
+                        if changed.is_err() {
+                            tx.send_replace(None);
+                            break;
+                        }
+                        tx.send_replace(*updates.borrow_and_update());
+                    }
+                }
+            }
+        });
+        Self { sender, shutdown: Some(shutdown_tx), join_handle: Some(join_handle) }
+    }
+
     /// Starts the async client. Immediately sends a system-time overlay and
     /// refreshes it every second so `MediaClock` always has a valid timestamp.
     pub fn start(_path: PathBuf, _error_handler: Box<dyn FnMut(OverlayReceiveError) + Send>) -> Self {
@@ -257,6 +283,21 @@ impl AsyncClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn injected_clock_forwards_loss_without_system_time_fallback() {
+        let initial = system_time_overlay();
+        let (sender, receiver) = tokio::sync::watch::channel(Some(initial));
+        let client = AsyncClient::from_updates(receiver);
+        let mut subscriber = client.subscribe();
+        assert_eq!(*subscriber.borrow_and_update(), Some(initial));
+        sender.send_replace(None);
+        tokio::time::timeout(std::time::Duration::from_secs(1), subscriber.changed()).await.unwrap().unwrap();
+        assert_eq!(*subscriber.borrow_and_update(), None);
+        drop(sender);
+        client.stop().await.unwrap();
+    }
 
     #[test]
     fn test_clock_overlay_decode_valid() {

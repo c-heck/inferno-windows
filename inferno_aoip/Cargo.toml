@@ -20,15 +20,14 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-log = "0.2"
 atomic_enum = "0.2"
-local-ip-address = "0.5"
+local-ip-address = "0.6"
 atomic = "0.6"
 rand = { version = "0.8", features = ["small_rng"] }
 toml = "0.8"
-platform-dirs = "0.3"
 clock-steering = "0.2"
 custom_error = "1.9"
 thiserror = "1.0.57"
-thread-priority = "0.15"
+thread-priority = "3.1"
 atomicbox = "0.4.0"
 mio = { version = "1.0.2", features = ["net", "os-ext", "os-poll"] }
 bool_vec = "0.2.1"
@@ -47,10 +46,12 @@ features = ["derive"]
 version = "1.36"
 features = ["net", "time", "sync", "signal"]
 
-[dependencies.windows]
-version = "0.51"
-features = ["Win32_Networking_WinSock"]
-
 [features]
 default = []
 ptp = []
+
+[target.'cfg(windows)'.dependencies]
+dirs = "6"
+
+[target.'cfg(not(windows))'.dependencies]
+platform-dirs = "0.3"

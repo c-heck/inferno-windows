@@ -71,3 +71,24 @@ pub fn make_channel_change_notification(
   content[1] = L(mask_len);
   Some(MulticastMessage { start_code: 0xffff, opcode: [0x07, 0x2a, 1, 2, 0, 0, 0, 0], content })
 }
+
+/// "Property Change" (262): Dante Controller re-reads the 0x1100 device settings (latency) on receipt.
+pub fn make_property_change_notification() -> MulticastMessage {
+  MulticastMessage { start_code: 0xffff, opcode: [0x07, 0x2a, 1, 6, 0, 0, 0, 0], content: vec![] }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn property_change_notification_layout() {
+    let msg = make_property_change_notification();
+    let mut buffer = [0u8; 64];
+    let packet = make_packet(&mut buffer, msg.start_code, 7, 0, [0, 0, 0xa9, 0xfe, 1, 2, 0, 0], *b"Audinate", msg.opcode, &msg.content).unwrap();
+    assert_eq!(packet.len(), HEADER_LENGTH);
+    assert_eq!(&packet[..4], &[0xff, 0xff, 0, 32]);
+    // Notification id read by Controller/netaudio at offset 26.
+    assert_eq!(u16::from_be_bytes([packet[26], packet[27]]), 262);
+  }
+}
