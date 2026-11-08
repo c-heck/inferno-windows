@@ -8,3 +8,4 @@ Cargo.lock
 inferno_driver/*.sys
 inferno_driver/*.cat
 inferno_driver/*.pdb
+/dist/

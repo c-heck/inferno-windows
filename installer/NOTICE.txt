@@ -1,0 +1,32 @@
+Inferno ARM ASIO - notices
+==========================
+
+Not affiliated with Audinate
+  Inferno ARM ASIO is an independent, unofficial project. It is not made, endorsed,
+  certified or supported by Audinate Pty Ltd. "Dante" and "Dante Virtual Soundcard" are
+  trademarks of Audinate Pty Ltd and are used here only to describe interoperability.
+  The 8-byte "Audinate" marker in network packets is a fixed protocol header required for
+  interoperability; the device identifies itself as manufacturer "Inferno-AoIP".
+
+  "ASIO" is a trademark of Steinberg Media Technologies GmbH. This software implements the
+  ASIO driver interface and does not include the Steinberg ASIO SDK.
+
+  No Audinate code, SDK or firmware is included. The protocol implementation is based on
+  the open-source Inferno AoIP project (https://gitlab.com/lumifaza/inferno), an
+  independent interoperability implementation.
+
+Licence
+  Copyright (C) the Inferno AoIP and Inferno ARM ASIO contributors.
+  This program is free software: you can redistribute it and/or modify it under the terms
+  of the GNU Affero General Public License version 3 (see LICENSE). It is distributed
+  WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+  A PARTICULAR PURPOSE.
+
+Source code
+  The complete corresponding source code for this build is available at the location in
+  SOURCE.txt, installed next to this file. If you received this installer without access
+  to that source, you may request it from whoever distributed it to you.
+
+Third-party components
+  Rust crates compiled into the binaries are distributed under their own licences
+  (mostly MIT / Apache-2.0); see the Cargo.lock file in the source repository.

@@ -1,0 +1,24 @@
+Inferno ARM ASIO - experimental, unofficial Dante-compatible ASIO driver for Windows on Arm
+
+This software is NOT made, endorsed or supported by Audinate. "Dante" is a trademark of
+Audinate Pty Ltd. It is based on the open-source Inferno AoIP project and is provided
+without warranty (GNU AGPL v3).
+
+What the installer does:
+  * Copies the driver (inferno_asio.dll), control panel and helper scripts to Program Files.
+  * Registers "Inferno ARM ASIO" as an ASIO device (64-bit HKLM). No kernel driver,
+    test signing or reboot is needed. A previous registration of a development build is
+    replaced by the installed copy.
+  * Optionally adds Windows Firewall rules and tunes the Dante network adapter.
+
+Requirements and notes:
+  * Windows 11 on Arm (e.g. Snapdragon X Elite). Choose the ARM64EC build for
+    Nuendo / Cubase on Windows on Arm.
+  * A wired Ethernet adapter on the Dante network. Select its address in the control
+    panel after installation.
+  * Inferno is a PTP follower only; another Dante device must be the clock leader.
+  * Close your DAW before installing, updating or uninstalling.
+
+Source code (GNU AGPL v3): the complete source for this build is published at the URL
+shown in Programs and Features and in SOURCE.txt in the installation folder. See
+NOTICE.txt for trademark and licence notices.

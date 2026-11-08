@@ -56,6 +56,22 @@ Opens Windows Firewall administrative console for network debugging.
 .\scripts\open-firewall-admin.ps1
 ```
 
+### `build-arm64-asio-installer.ps1`
+Builds the Windows on Arm installer for the Inferno ARM ASIO driver
+(`dist\InfernoArmAsio-<version>-arm64-setup.exe`, Inno Setup 6.3+ required:
+`winget install JRSoftware.InnoSetup`). Sources are in `installer\`.
+
+**Usage:**
+```powershell
+.\scripts\build-arm64-asio-installer.ps1                 # ARM64EC driver (Nuendo/Cubase)
+.\scripts\build-arm64-asio-installer.ps1 -IncludeNative  # also offer the native ARM64 build
+.\scripts\build-arm64-asio-installer.ps1 -SkipBuild      # package existing release builds
+.\scripts\build-arm64-asio-installer.ps1 -Release        # distribution build: requires committed + pushed source
+```
+
+The installer links to the source repository (`-SourceUrl`, default `origin`) and records
+the exact commit in `SOURCE.txt`, as AGPL v3 requires for distributed binaries.
+
 ### `soak_test.ps1`
 Overnight stability soak test harness for `inferno_wasapi.exe`.
 

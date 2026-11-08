@@ -376,24 +376,16 @@ impl<'s> Multicaster<'s> {
     }
     if let Some(mc) = master_clock {
       assert_eq!(mc.len(), 8);
-      let mut bytes = ByteBuffer::new();
-      bytes.set_endian(bytebuffer::Endian::BigEndian);
-      bytes.write_bytes(&[
-        0x00, 0x03, 0x00, 0x03, /* 0x01 = PLL not locked */
-        0x00, 0x00, 0x00, 0x9f, /* was 0xff */
-      ]);
-      bytes.write_i32(freq_offset);
-      bytes.write_bytes(&self.self_info.mac_address.octets());
-      bytes.write_u16(0);
-      bytes.write_bytes(&mc);
-      bytes.write_bytes(&mc);
-      bytes.write_bytes(&[0u8; 76]);
+      let record = clock_status_record(freq_offset, self.self_info.mac_address.octets(), &mc);
       self
         .send(
           self.device_info_destination,
           0xffff,
-          [0x07, 0x2a, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00],
-          bytes.as_bytes(),
+          [
+            (CLOCK_STATUS_REVISION >> 8) as u8, CLOCK_STATUS_REVISION as u8,
+            0x00, 0x20, 0x00, 0x00, 0x00, 0x00,
+          ],
+          &record,
         )
         .await;
     }
@@ -423,6 +415,81 @@ impl<'s> Multicaster<'s> {
         bytes.as_bytes(),
       )
       .await;
+  }
+}
+
+// Clocking Status (0x0020) record revision. 0x072e is the oldest revision whose extension
+// flags carry "preferred leader locked", so Dante Controller shows this device as Follower Only
+// (like DVS) instead of offering it as a PTP leader, which Inferno cannot be.
+const CLOCK_STATUS_REVISION: u16 = 0x072e;
+const CLOCK_STATUS_EXTENSION_OFFSET: u16 = 0x34;
+const CLOCK_CAP_NO_PREFERRED_LEADER: u16 = 0x0100;
+const CLOCK_FLAG_FOLLOWER_ONLY: u16 = 0x0004;
+const CLOCK_FLAG_PREFERRED_LEADER_LOCKED: u16 = 0x1000;
+const PTP_PORT_STATE_FOLLOWER: u16 = 9;
+const WORD_CLOCK_NONE: u16 = 1;
+
+// Body following the 8-byte revision/opcode word; offsets in comments are relative to the
+// revision word, which is how the record is laid out on the wire.
+fn clock_status_record(freq_offset: i32, mac: [u8; 6], master: &[u8]) -> Vec<u8> {
+  let mut bytes = ByteBuffer::new();
+  bytes.set_endian(bytebuffer::Endian::BigEndian);
+  bytes.write_bytes(&[
+    0x00, 0x03, 0x00, 0x03, /* 0x08 clock state disciplined, servo synchronized */
+    0x00, 0x00, 0x00, 0x9f, /* 0x0c clock source, preferred leader = no, stratum */
+  ]);
+  bytes.write_i32(freq_offset); // 0x10
+  bytes.write_bytes(&mac); // 0x14 own PTP identity
+  bytes.write_u16(0);
+  bytes.write_bytes(master); // 0x1c master
+  bytes.write_bytes(master); // 0x24 grandmaster
+  bytes.write_u16(1); // 0x2c port count
+  bytes.write_u16(CLOCK_STATUS_EXTENSION_OFFSET); // 0x2e
+  bytes.write_u16(PTP_PORT_STATE_FOLLOWER); // 0x30 port 1 state
+  bytes.write_u16(0);
+  // 0x34 extension (44 bytes for revisions >= 0x0726)
+  bytes.write_u16(CLOCK_CAP_NO_PREFERRED_LEADER);
+  bytes.write_u16(0);
+  bytes.write_u32(100_000); // max drift ppb
+  bytes.write_u8(0);
+  bytes.write_u8(0); // PTP domain
+  bytes.write_u16(CLOCK_FLAG_FOLLOWER_ONLY | CLOCK_FLAG_PREFERRED_LEADER_LOCKED);
+  bytes.write_bytes(&[0u8; 16]); // subdomain
+  bytes.write_u16(0); // mute flags
+  bytes.write_u16(WORD_CLOCK_NONE);
+  bytes.write_bytes(&[0u8; 12]); // no port vector / global block
+  bytes.into_vec()
+}
+
+#[cfg(test)]
+mod clock_status_tests {
+  use super::*;
+
+  #[test]
+  fn clock_status_advertises_follower_only() {
+    let master = [0x00, 0x1d, 0xc1, 0xff, 0xfe, 0x03, 0x53, 0x66];
+    let body = clock_status_record(-1234, [1, 2, 3, 4, 5, 6], &master);
+    let mut r = vec![(CLOCK_STATUS_REVISION >> 8) as u8, CLOCK_STATUS_REVISION as u8, 0, 0x20, 0, 0, 0, 0];
+    r.extend_from_slice(&body);
+    let u16_at = |o: usize| u16::from_be_bytes([r[o], r[o + 1]]);
+    assert!(u16_at(0) >= 0x072e);
+    assert_eq!(r[14], 0, "must not claim preferred leader");
+    assert_eq!(i32::from_be_bytes(r[16..20].try_into().unwrap()), -1234);
+    assert_eq!(&r[0x14..0x1a], &[1, 2, 3, 4, 5, 6]);
+    assert_eq!(&r[0x1c..0x24], &master);
+    assert_eq!(u16_at(0x2c), 1);
+    assert_eq!(u16_at(0x30), PTP_PORT_STATE_FOLLOWER);
+    let e = u16_at(0x2e) as usize;
+    assert_eq!(e, 0x34);
+    assert_eq!(r.len(), e + 44);
+    assert_ne!(u16_at(e) & 0x0120, 0);
+    let flags = u16_at(e + 10);
+    assert_ne!(flags & 0x0004, 0, "follower only");
+    assert_ne!(flags & 0x1000, 0, "preferred leader locked");
+    assert!(r[e + 12..e + 28].contains(&0));
+    assert_eq!(u16_at(e + 28), 0, "not muted");
+    assert_eq!(u16_at(e + 30), WORD_CLOCK_NONE);
+    assert_eq!(u16_at(e + 34), 0, "no port vector");
   }
 }
 

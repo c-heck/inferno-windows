@@ -198,7 +198,9 @@ fn create_self_info(
     model_name: app_name.to_owned(),
     factory_device_id: devid,
     process_id,
-    vendor_string: "Audinate Dante-compatible".to_owned(),
+    // Fixed 8-byte protocol header marker that every Dante device and Controller require
+    // for interoperability; it is not a vendor claim. The displayed vendor is `manufacturer`.
+    vendor_string: "Audinate".to_owned(),
     factory_hostname: format!("{short_app_name}-{}", hex::encode(devid)),
     friendly_hostname,
     model_number: model_number(),

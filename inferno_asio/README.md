@@ -213,7 +213,38 @@ In the DAW, select **Inferno ARM ASIO**. To remove the registration:
 
 ### Rolling out to other Windows on Arm machines
 
-Each machine needs these steps:
+**Installer (recommended).** `.\scripts\build-arm64-asio-installer.ps1 -IncludeNative`
+builds `dist\InfernoArmAsio-<version>-arm64-setup.exe` (arm64 only, Windows 11).
+It installs the driver, control panel and helper scripts to
+`C:\Program Files\Inferno ARM ASIO`, and registers the ASIO/COM entries with
+the same CLSID as `register-arm64-asio.ps1`. It offers the ARM64EC build
+(default, for Nuendo/Cubase) or the native ARM64 build. Optional tasks:
+- Firewall rules (group "Inferno ARM ASIO"): UDP 45000–45003, 319–320,
+  5353, 8702 and 8708 from the local subnet, plus program rules for installed
+  Nuendo/Cubase, since receive audio uses ephemeral ports.
+- Dante NIC tuning (`tune-dante-nic.ps1`).
+
+Uninstall restores an orphaned power plan, then removes the plan, firewall
+rules, registry entries and the logon recovery entry. For unattended
+deployment:
+
+```powershell
+InfernoArmAsio-0.1.0-arm64-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TYPE=ec /TASKS=firewall
+"C:\Program Files\Inferno ARM ASIO\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+```
+
+Installing replaces a development registration. To go back to a dev build,
+run `register-arm64-asio.ps1` again. The installer is not code-signed, so
+SmartScreen warns on first run.
+
+Licence and source: the installer includes `LICENSE` (AGPL v3), `NOTICE.txt`
+(non-affiliation and trademark notices) and a generated `SOURCE.txt` with the
+repository URL (`-SourceUrl`, default: the `origin` remote) and the exact
+commit. The URL also appears in Programs and Features and in the Start menu.
+Build installers you distribute with `-Release`, which refuses uncommitted or
+unpushed source, so the published source matches the binaries.
+
+**Manual.** Each machine needs these steps:
 
 1. Copy `inferno_asio.dll`, `inferno_control.exe` and `scripts\` to a fixed
    path. Use the ARM64EC build for Nuendo/Cubase on Windows on Arm.
@@ -301,6 +332,17 @@ These properties are read-only, except the ones below.
   receive packets (Packet Errors), per-flow late packets (Latency status) and
   per-channel signal levels, which drive the green signal icons on the
   Transmit/Receive tabs. Levels use the Dante scale (-2 × dBFS, 0xc1 silence).
+- **Follower Only, like DVS.** Inferno only follows PTP. It has no leader or
+  grandmaster implementation and no external word-clock input. Earlier
+  builds sent an old-format Clocking Status (0x0020) record with no
+  capability block, so Controller offered the device as **Preferred Leader**.
+  Selecting it could make the network elect a clock that cannot lead. The
+  record now uses revision 0x072e with one PTP port in the Follower state and
+  an extension block: flags `follower_only` (0x0004) and `preferred leader
+  locked` (0x1000), capability 0x0100, and word clock "none". Controller's
+  Preferred Leader and Sync-to-External controls should therefore be
+  disabled. Clock-control writes sent to the info port are answered with this
+  status and never change the role.
 
 Controller-side sample-rate, encoding and
 pull-up configuration remain unsupported; use the Inferno panel/DAW for the
